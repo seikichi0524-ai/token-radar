@@ -1,7 +1,9 @@
-// Token Radar (radar-2) — entry point. Node 22, standard library only.
+// Token Radar (radar-3 fit, board edition 2) — entry point. Node 22,
+// standard library only.
 //
 // Reads the sealed snapshot, scores every selected pre-token protocol with
-// lib/model.ts, then writes into the output directory:
+// lib/model.ts — a valuation fitted on the snapshot's own issued protocols,
+// not hand-set — then writes into the output directory:
 //   board.json    the ranked board (watchlist fully covered, 100+ rows)
 //   data.js       the same board in the dashboard's compact form
 //   dashboard/    a copy of this repo's dashboard/
@@ -10,6 +12,9 @@
 //
 // The run is deterministic: no clock, no randomness, no network. Sorting is
 // by implied value with a slug tie-break, so two runs write identical bytes.
+// The fit itself is not re-run here: lib/model.ts carries the constants
+// tools/fit.mjs produced from this same snapshot, and that script is in the
+// repo so the numbers can be reproduced and checked.
 //
 // Local run:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.json
@@ -84,9 +89,15 @@ const dossier = buildDossier(outDir, {
 });
 writeFileSync(join(outDir, 'dossier.json'), dossier);
 
+const top = board[0];
 process.stdout.write(
   'token radar: ' + snapshot.protocols.length + ' protocols, ' + snapshot.watchlist.length + ' watchlist, ' +
     board.length + ' rows scored (' + radar.early_size + ' early, ' + radar.live_size + ' live set aside)\n' +
+    (top === undefined ? '' : 'token radar: top of the board is ' + top.name + ' at $' + top.implied_value_usd.toLocaleString('en-US') + ' implied\n') +
+    'token radar: model ' + radar.model_version + ' (board edition ' + radar.board_edition + ') fitted on ' + radar.model.comps + ' issued comparables' +
+    ' (out-of-sample median log error ' + radar.validation.fitted_median_log_err + ' vs ' +
+    radar.validation.radar2_median_log_err + ' for the hand-set radar-2); ' +
+    radar.audit.length + ' pre-token protocols audited off-board\n' +
     'token radar: wrote board.json, data.js, dashboard/ (' + dashFiles.length + ' files), screenshots/ (' +
     shots.length + ' images) and dossier.json (' + dossier.length + ' bytes)\n',
 );
