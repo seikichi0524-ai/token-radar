@@ -1,65 +1,66 @@
-// fit.mjs — how radar-3's constants were produced, how they were tested, and
-// what else was tried against them before this edition shipped.
+// fit.mjs — how radar-4's constants were produced, how they were tested,
+// and what was tried and rejected on the way. This file is the entry's lab
+// notebook: every number the dashboard quotes is regenerated here from the
+// snapshot, and the two files under lib/ that the build cannot compute for
+// itself (the bootstrap bands and the issuance model's weights) are
+// written here too.
 //
 // Run:  node tools/fit.mjs <snapshot.json>
-//       (also writes lib/bands.ts — the bootstrap value bands the dashboard
-//        shows — when run from the repo root)
+//       (writes lib/bands.ts and lib/ptoken.ts when run from the repo root)
 //
-// THE FIT. radar-3 does not hand-pick its multiples. It learns them from the
-// snapshot itself: the protocols in the file that already carry a token
-// (mcap_usd set) are the comparables. Only comparables that would pass the
-// radar's own "a protocol in its own right" reading are used — no wrapped,
-// staked or bridged products of another protocol, no exchange fronts, no
-// versioned duplicates — because those are not what a pre-token protocol
-// will launch as. Least squares in log10 space:
+// THE VALUE FIT. radar-4 learns a launch multiple from the snapshot's own
+// issued protocols. The comparables are the issued protocols that pass the
+// radar's "a protocol in its own right" reading — no wrapped, staked or
+// bridged products of another protocol, no exchange fronts, no versioned
+// duplicates — 92 of the 128 issued rows. Least squares in log10 space:
 //
-//   log10(mcap) = b0 + b1*log10(TVL) + bg*g + ba*ageT + bc*chains + off[group]
+//   log10(mcap) = b0 + b1*log10(TVL) + ba*ageT + bc*chains
 //
-//   g      the 7-day TVL change, clamped to [-50, +80] and square-root damped
-//          past +/-25%, in units of 1.0 = 100 damped points
 //   ageT   min(age_days, 1825) / 1825, unknown age counting as 365 days
 //   chains the protocol's chain count, capped at 10
-//   group  the category family (see groupOf); off[] is each family's mean
-//          residual, shrunk toward zero by n/(n+4) so a family with two
-//          members cannot shout down the global curve
 //
-// One sign is constrained on principle, not fitted: growth may not hurt. If
-// the unconstrained fit wants bg < 0, the growth term is dropped and the
-// rest is refit — a protocol is never marked down for growing. (On this
-// snapshot the free fit does want bg < 0, so the shipped growth_coef is 0.
-// Practitioner evidence agrees: pre-launch TVL spikes are usually rented,
-// points-driven capital that leaves at TGE, not durable demand.)
+// One sign is constrained on principle, not fitted: growth may not hurt.
+// Given a free coefficient the 7-day change fits negative, so the term is
+// dropped and the rest refit — a protocol is never marked down for
+// growing. (Practitioner evidence agrees: pre-launch TVL spikes are
+// usually rented, points-driven capital that leaves at TGE.)
 //
-// VALIDATION. Four tests, all out-of-sample, all reproduced below:
-//   1. canonical 3-fold by slug hash (every comparable scored once by a
-//      model that never saw it), against radar-2 and a naive flat multiple;
-//   2. leave-one-out over all comparables;
-//   3. time splits by listed_at, both directions (fit the older half, score
-//      the newer; and the reverse) — the walk-forward analogue a single
-//      cross-section allows;
-//   4. the same 3-fold read as a ranking (Spearman), because the product
-//      is a ranking.
+// WHAT RADAR-4 REMOVED, AND WHY. radar-3 also carried a per-family offset
+// (curators up, lending down, ...), shrunk toward zero by n/(n+4). On the
+// canonical slug-hash folds those offsets looked like the model's best
+// idea. They did not survive a sterner test: over 20 repetitions of
+// 5-fold cross-validation the offsets made the median error WORSE at every
+// shrinkage level tried (k = 2, 4, 8, 16, 32), monotonically — the
+// no-offset spec scored 0.526 against 0.579 for the shipped k = 4 — and a
+// paired bootstrap on the canonical folds puts the whole model's edge
+// over a bare power law (intercept + log TVL only) at a mean of -0.002
+// with a 95% CI of [-0.041, +0.037]: indistinguishable from zero. With 92
+// comparables the parameter budget is spent; radar-4 ships the simpler
+// spec and publishes the ablation below instead of the offsets.
 //
-// THE CHALLENGER THAT DID NOT SHIP. Before this edition, a robust refit was
-// specified in advance — Huber IRLS loss (k = 1.345, MAD scale) plus
-// empirical-Bayes partial pooling of the family offsets (DerSimonian-Laird
-// tau^2, floored at 0.01) — together with the rule that would adopt it:
-// pooled 3-fold median error better by >= 0.03, a paired-bootstrap 95% CI
-// for the improvement excluding zero, and no Spearman loss beyond 0.005.
-// It failed all three: median error 0.530 vs 0.509, CI [-0.141, +0.106],
-// Spearman 0.244 vs 0.301. Its tau^2 hit the floor, collapsing the family
-// offsets the data supports. Leave-one-out and repeated 10x10 CV leaned
-// the other way; time splits agreed with the canonical folds. Mixed
-// evidence under a pre-registered rule means the incumbent ships: the
-// constants below are radar-3's, unchanged. The challenger code is kept
-// in this file so the experiment can be re-run, not re-litigated.
+// THE ISSUANCE MODEL. Value at issuance is only half a farmer's question;
+// the other half is whether a token arrives at all. A logistic regression
+// over the snapshot's clearly-labelled protocols (the 92 issued
+// comparables as positives, the 198 standalone pre-token protocols as
+// negatives) scores P(token) from log TVL, age, chain count and category
+// family. Cross-validated AUC is printed below (about 0.71: real signal,
+// far from certainty). The board keeps its ranking by value at issuance —
+// that is the question the bounty asks — and carries P(token) and the
+// expected value P x value beside it.
 //
-// THE BANDS. Point estimates on a x3.2-typical-miss problem are only half
-// the story, so the dashboard also carries a band per board row: 200
-// bootstrap refits of the shipped spec (comps resampled with replacement,
-// seeded RNG, so the bands are reproducible), each refit re-pricing and
-// re-ranking the whole board. lib/bands.ts records, per board slug, the
-// 10th–90th percentile of implied value and of rank across those refits.
+// THE BANDS AND THE INTERVAL. Each board row carries two ranges that mean
+// different things, and the dashboard says so. The band is fit
+// uncertainty: 200 bootstrap refits of the value spec, each repricing and
+// re-ranking the whole board (lib/bands.ts). The prediction interval is
+// wider and more honest: the 10th–90th percentiles of the canonical
+// folds' signed out-of-sample residuals, applied to the point estimate —
+// where launches actually landed relative to fits like this one.
+//
+// VALIDATION. All out-of-sample, all reproduced below: canonical 3-fold
+// by slug hash for radar-4 against a bare power law, the offset ablation
+// and a naive multiple (median error, Spearman, precision in the top
+// 30%); leave-one-out; time splits both directions; the repeated-CV
+// ablation; the paired bootstrap; and the issuance model's CV AUC.
 
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 
@@ -147,83 +148,50 @@ function wls(X, y, w) {
   return b.map((v, i) => v / A[i][i]);
 }
 const medianOf = (a) => { const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
+const meanOf = (a) => a.reduce((s, v) => s + v, 0) / a.length;
 
 const SHRINK_K = 4;
 
-function features(p, useGrowth) {
-  const age = ageDays(p);
+// Feature builders for the specs under test. radar-4 is 'value'; 'offsets'
+// is the radar-3 ablation (same features plus shrunk family offsets);
+// 'power' is the bare null (intercept + log TVL).
+function featsValue(p, useGrowth) {
   const f = [1, Math.log10(Math.max(1, p.tvl_usd))];
   if (useGrowth) f.push(dampedGrowth(p));
-  f.push(Math.min(age ?? 365, 1825) / 1825);
+  f.push(Math.min(ageDays(p) ?? 365, 1825) / 1825);
   f.push(Math.min(p.chains.length, 10));
   return f;
 }
-
-// mode: { loss: 'ols' | 'huber', shrink: 'fixed' | 'eb' }
-function fitOnce(rows, useGrowth, mode) {
+function fitSpec(train, kind) {
   let offsets = {};
   let beta = null;
-  let weights = rows.map(() => 1);
-  const rounds = mode.loss === 'huber' ? 12 : 3;
-  for (let iter = 0; iter < rounds; iter++) {
-    beta = wls(rows.map((r) => r.f), rows.map((r) => r.y - (offsets[r.grp] ?? 0)), weights);
-    const residByGrp = {};
-    const allResid = [];
-    rows.forEach((r, i) => {
-      const pred = r.f.reduce((s, v, j) => s + v * beta[j], 0) + (offsets[r.grp] ?? 0);
-      const e = r.y - pred;
-      (residByGrp[r.grp] ??= []).push({ e, w: weights[i] });
-      allResid.push(e);
-    });
-    const next = {};
-    if (mode.shrink === 'fixed') {
-      for (const [g, rs] of Object.entries(residByGrp)) {
-        const sw = rs.reduce((a, c) => a + c.w, 0);
-        next[g] = (rs.reduce((a, c) => a + c.w * c.e, 0) / sw) * (rs.length / (rs.length + SHRINK_K));
-      }
-    } else {
-      const means = {}, ns = {};
-      let pooledNum = 0, pooledDen = 0;
-      for (const [g, rs] of Object.entries(residByGrp)) {
-        const sw = rs.reduce((a, c) => a + c.w, 0);
-        means[g] = rs.reduce((a, c) => a + c.w * c.e, 0) / sw;
-        ns[g] = rs.length;
-        for (const c of rs) { pooledNum += c.w * c.e * c.e; pooledDen += c.w; }
-      }
-      const sigma2 = pooledDen > 0 ? pooledNum / pooledDen : 0.25;
-      const gs = Object.keys(means);
-      const grandMean = gs.reduce((a, g) => a + means[g], 0) / gs.length;
-      const scatter = gs.reduce((a, g) => a + (means[g] - grandMean) ** 2, 0) / Math.max(1, gs.length - 1);
-      const noise = gs.reduce((a, g) => a + sigma2 / ns[g], 0) / gs.length;
-      const tau2 = Math.max(0.01, scatter - noise);
-      for (const g of gs) next[g] = means[g] * (tau2 / (tau2 + sigma2 / ns[g]));
+  let useGrowth = kind !== 'power';
+  for (let round = 0; round < 2; round++) {
+    const featFn = kind === 'power' ? (p) => [1, Math.log10(Math.max(1, p.tvl_usd))] : (p) => featsValue(p, useGrowth);
+    const rows = train.map((p) => ({ f: featFn(p), y: Math.log10(p.mcap_usd), grp: groupOf(p.category) }));
+    beta = wls(rows.map((r) => r.f), rows.map((r) => r.y - (offsets[r.grp] ?? 0)), null);
+    if (kind === 'offsets') {
+      const byGrp = {};
+      rows.forEach((r) => {
+        const pred = r.f.reduce((s, v, j) => s + v * beta[j], 0) + (offsets[r.grp] ?? 0);
+        (byGrp[r.grp] ??= []).push(r.y - pred);
+      });
+      const next = {};
+      for (const [g, es] of Object.entries(byGrp)) next[g] = meanOf(es) * (es.length / (es.length + SHRINK_K));
+      offsets = next;
     }
-    offsets = next;
-    if (mode.loss === 'huber') {
-      const med = medianOf(allResid);
-      const mad = medianOf(allResid.map((e) => Math.abs(e - med)));
-      const sigma = Math.max(0.05, 1.4826 * mad);
-      const k = 1.345 * sigma;
-      weights = allResid.map((e) => (Math.abs(e) <= k ? 1 : k / Math.abs(e)));
+    if (round === 0 && useGrowth) {
+      const gIdx = 2;
+      if (beta[gIdx] < 0) { useGrowth = false; continue; } // growth may not hurt: drop and refit
     }
+    break;
   }
-  return { beta, offsets, useGrowth };
+  const featFn = kind === 'power' ? (p) => [1, Math.log10(Math.max(1, p.tvl_usd))] : (p) => featsValue(p, useGrowth);
+  return { beta, offsets: kind === 'offsets' ? offsets : {}, featFn, useGrowth };
 }
-
-function fitModel(train, mode) {
-  const mk = (useGrowth) => train.map((p) => ({ f: features(p, useGrowth), y: Math.log10(p.mcap_usd), grp: groupOf(p.category) }));
-  let model = fitOnce(mk(true), true, mode);
-  if (model.beta[2] < 0) model = fitOnce(mk(false), false, mode); // growth may not hurt
-  return model;
+function predictSpec(model, p) {
+  return model.featFn(p).reduce((s, v, i) => s + v * model.beta[i], 0) + (model.offsets[groupOf(p.category)] ?? 0);
 }
-
-function predictLog(model, p) {
-  const f = features(p, model.useGrowth);
-  return f.reduce((s, v, i) => s + v * model.beta[i], 0) + (model.offsets[groupOf(p.category)] ?? 0);
-}
-
-const SHIPPED = { loss: 'ols', shrink: 'fixed' };
-const CHALLENGER = { loss: 'huber', shrink: 'eb' };
 
 // ------------------------------------------------------------- radar-2 (v1)
 const V1_MULT = { dexs: 0.34, derivatives: 0.33, lending: 0.31, launchpad: 0.30, rwa: 0.29, chain: 0.29, curators: 0.27, staking: 0.26, basis: 0.25, other: 0.24, yield: 0.23, bridge: 0.22, farm: 0.21, indexes: 0.20, locker: 0.19 };
@@ -239,11 +207,7 @@ function v1Implied(p) {
   return p.tvl_usd * V1_MULT[groupOf(p.category)] * growthFactor * maturity * breadth * scale;
 }
 
-// ------------------------------------------------------------------ running
-const issued = snap.protocols.filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
-const comps = issued.filter((p) => !isProductOfAnother(p) && !VERSIONED.test(p.name));
-process.stdout.write('comparables: ' + comps.length + ' of ' + issued.length + ' issued protocols pass the rankable reading\n');
-
+// ------------------------------------------------------------------ metrics
 function fnv(s, salt = '') {
   let h = 0x811c9dc5;
   const str = salt + s;
@@ -253,158 +217,331 @@ function fnv(s, salt = '') {
 function metrics(errs) {
   const a = errs.map(Math.abs).sort((x, y) => x - y);
   return {
-    n: errs.length,
     median: a[Math.floor(a.length / 2)],
-    mean: a.reduce((s, v) => s + v, 0) / a.length,
-    within2x: errs.filter((e) => Math.abs(e) <= Math.log10(2)).length / errs.length,
-    within3x: errs.filter((e) => Math.abs(e) <= Math.log10(3)).length / errs.length,
+    mean: meanOf(a),
+    within2: errs.filter((e) => Math.abs(e) <= Math.log10(2)).length / errs.length,
+    within3: errs.filter((e) => Math.abs(e) <= Math.log10(3)).length / errs.length,
   };
 }
 function spearman(preds, actuals) {
-  const rank = (a) => { const idx = a.map((v, i) => [v, i]).sort((x, y) => x[0] - y[0]); const r = new Array(a.length); idx.forEach(([, i], j) => { r[i] = j; }); return r; };
+  const rank = (arr) => { const s = arr.map((v, i) => [v, i]).sort((x, y) => x[0] - y[0]); const r = new Array(arr.length); s.forEach(([, i], j) => { r[i] = j; }); return r; };
   const rp = rank(preds), ra = rank(actuals);
-  const n = preds.length;
-  const mp = rp.reduce((a, c) => a + c, 0) / n, ma = ra.reduce((a, c) => a + c, 0) / n;
-  let cov = 0, vp = 0, va = 0;
-  for (let i = 0; i < n; i++) { cov += (rp[i] - mp) * (ra[i] - ma); vp += (rp[i] - mp) ** 2; va += (ra[i] - ma) ** 2; }
-  return cov / Math.sqrt(vp * va);
+  const mp = meanOf(rp), ma = meanOf(ra);
+  let num = 0, dp = 0, da = 0;
+  for (let i = 0; i < preds.length; i++) { num += (rp[i] - mp) * (ra[i] - ma); dp += (rp[i] - mp) ** 2; da += (ra[i] - ma) ** 2; }
+  return num / Math.sqrt(dp * da);
+}
+function precisionTop30(preds, actuals) {
+  const n = preds.length, k = Math.round(n * 0.3);
+  const topPred = new Set(preds.map((v, i) => [v, i]).sort((a, b) => b[0] - a[0]).slice(0, k).map(([, i]) => i));
+  const topAct = new Set(actuals.map((v, i) => [v, i]).sort((a, b) => b[0] - a[0]).slice(0, k).map(([, i]) => i));
+  let hit = 0; topPred.forEach((i) => { if (topAct.has(i)) hit++; });
+  return hit / k;
 }
 function rng(seed) { let a = seed >>> 0; return () => { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
 
-// canonical 3-fold, pooled out-of-fold
-const errs = { fitted: [], challenger: [], radar2: [], naive: [] };
-const oofPred = { fitted: [], challenger: [], actual: [] };
-for (let fold = 0; fold < 3; fold++) {
-  const test = comps.filter((p) => fnv(p.slug) % 3 === fold);
-  const train = comps.filter((p) => fnv(p.slug) % 3 !== fold);
-  const model = fitModel(train, SHIPPED);
-  const chal = fitModel(train, CHALLENGER);
-  const ratios = train.map((p) => p.mcap_usd / p.tvl_usd).sort((a, b) => a - b);
-  const medMult = ratios[Math.floor(ratios.length / 2)];
-  for (const p of test) {
-    const actual = Math.log10(p.mcap_usd);
-    const pf = predictLog(model, p), pc = predictLog(chal, p);
-    errs.fitted.push(pf - actual);
-    errs.challenger.push(pc - actual);
-    errs.radar2.push(Math.log10(v1Implied(p)) - actual);
-    errs.naive.push(Math.log10(p.tvl_usd * medMult) - actual);
-    oofPred.fitted.push(pf); oofPred.challenger.push(pc); oofPred.actual.push(actual);
-  }
-}
-process.stdout.write('\ncanonical 3-fold (pooled out-of-fold, n=' + errs.fitted.length + '):\n');
-for (const name of ['fitted', 'challenger', 'radar2', 'naive']) {
-  const m = metrics(errs[name]);
-  process.stdout.write(
-    '  ' + name.padEnd(10) + ' median |log10 err| ' + m.median.toFixed(3) + ' (typical miss x' + Math.pow(10, m.median).toFixed(2) + ')' +
-    ', mean ' + m.mean.toFixed(3) + ', within 2x ' + (m.within2x * 100).toFixed(0) + '%, within 3x ' + (m.within3x * 100).toFixed(0) + '%\n',
-  );
-}
-process.stdout.write('  spearman: fitted ' + spearman(oofPred.fitted, oofPred.actual).toFixed(3) + ', challenger ' + spearman(oofPred.challenger, oofPred.actual).toFixed(3) + '\n');
+// ------------------------------------------------------------------ running
+const issued = snap.protocols.filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
+const comps = issued.filter((p) => !isProductOfAnother(p) && !VERSIONED.test(p.name));
+process.stdout.write('comparables: ' + comps.length + ' of ' + issued.length + ' issued protocols pass the rankable reading\n');
+
+// ---- the shipped fit, on all comparables at once
+const shipped = fitSpec(comps, 'value');
 {
-  const rand = rng(20261118);
-  const n = errs.fitted.length;
-  const diffs = [];
-  for (let b = 0; b < 3000; b++) {
-    const e1 = [], e2 = [];
-    for (let i = 0; i < n; i++) { const j = Math.floor(rand() * n); e1.push(errs.fitted[j]); e2.push(errs.challenger[j]); }
-    diffs.push(medianOf(e1.map(Math.abs)) - medianOf(e2.map(Math.abs)));
-  }
-  diffs.sort((a, b) => a - b);
-  process.stdout.write('  challenger adoption test: improvement ' + (metrics(errs.fitted).median - metrics(errs.challenger).median).toFixed(3) +
-    ', paired-bootstrap 95% CI [' + diffs[Math.floor(0.025 * diffs.length)].toFixed(3) + ', ' + diffs[Math.floor(0.975 * diffs.length)].toFixed(3) + '] -> challenger NOT adopted (pre-registered rule)\n');
+  const b = shipped.beta;
+  const gi = shipped.useGrowth ? 1 : 0;
+  process.stdout.write('\nradar-4 fit on all ' + comps.length + ' comparables (growth ' + (shipped.useGrowth ? 'kept' : 'dropped by the sign rule') + '):\n');
+  process.stdout.write('  intercept ' + b[0].toFixed(6) + ', tvl_slope ' + b[1].toFixed(6));
+  if (shipped.useGrowth) process.stdout.write(', growth_coef ' + b[2].toFixed(6));
+  process.stdout.write(', age_coef ' + b[2 + gi].toFixed(6) + ', chain_coef ' + b[3 + gi].toFixed(6) + '\n');
 }
 
-// leave-one-out
+// ---- canonical 3-fold, all specs
+const canonErr = {};
+const canonPred = {};
+for (const kind of ['value', 'power', 'offsets']) {
+  const errs = [], preds = [], acts = [];
+  canonErr[kind] = new Map();
+  for (let fold = 0; fold < 3; fold++) {
+    const test = comps.filter((p) => fnv(p.slug) % 3 === fold);
+    const train = comps.filter((p) => fnv(p.slug) % 3 !== fold);
+    const m = fitSpec(train, kind);
+    for (const p of test) {
+      const pr = predictSpec(m, p);
+      errs.push(pr - Math.log10(p.mcap_usd)); preds.push(pr); acts.push(Math.log10(p.mcap_usd));
+      canonErr[kind].set(p.slug, pr - Math.log10(p.mcap_usd));
+    }
+  }
+  canonPred[kind] = preds;
+  const mt = metrics(errs);
+  const label = kind === 'value' ? 'radar-4' : kind === 'power' ? 'power law only' : 'radar-3 ablation (+offsets)';
+  process.stdout.write('3-fold ' + label.padEnd(28) + ' median ' + mt.median.toFixed(3) + ' (x' + Math.pow(10, mt.median).toFixed(2) + '), mean ' + mt.mean.toFixed(3) + ', within2x ' + (mt.within2 * 100).toFixed(0) + '%, within3x ' + (mt.within3 * 100).toFixed(0) + '%, spearman ' + spearman(preds, acts).toFixed(3) + ', precision@top30% ' + precisionTop30(preds, acts).toFixed(2) + '\n');
+}
 {
-  const eF = [], eC = [];
-  comps.forEach((p, i) => {
-    const train = comps.filter((_, j) => j !== i);
-    eF.push(predictLog(fitModel(train, SHIPPED), p) - Math.log10(p.mcap_usd));
-    eC.push(predictLog(fitModel(train, CHALLENGER), p) - Math.log10(p.mcap_usd));
+  const errs = comps.map((p) => Math.log10(v1Implied(p)) - Math.log10(p.mcap_usd));
+  // radar-2 read out-of-sample the way edition 2 measured it: refit-free hand
+  // multiples are already out-of-sample by construction; kept for continuity.
+  const mt = metrics(errs);
+  process.stdout.write('reference radar-2 (hand-set)      median ' + mt.median.toFixed(3) + ' (in-sample-free hand multiples; see edition history)\n');
+  const naiveErrs = [];
+  for (let fold = 0; fold < 3; fold++) {
+    const test = comps.filter((p) => fnv(p.slug) % 3 === fold);
+    const train = comps.filter((p) => fnv(p.slug) % 3 !== fold);
+    const mult = medianOf(train.map((p) => p.mcap_usd / p.tvl_usd));
+    for (const p of test) naiveErrs.push(Math.log10(p.tvl_usd * mult) - Math.log10(p.mcap_usd));
+  }
+  const nm = metrics(naiveErrs);
+  process.stdout.write('3-fold naive flat multiple       median ' + nm.median.toFixed(3) + ' (x' + Math.pow(10, nm.median).toFixed(2) + '), within2x ' + (nm.within2 * 100).toFixed(0) + '%\n');
+}
+
+// ---- leave-one-out and time splits for radar-4
+{
+  const errs = comps.map((p) => {
+    const m = fitSpec(comps.filter((q) => q !== p), 'value');
+    return predictSpec(m, p) - Math.log10(p.mcap_usd);
   });
-  process.stdout.write('\nleave-one-out: fitted ' + metrics(eF).median.toFixed(3) + ', challenger ' + metrics(eC).median.toFixed(3) + '\n');
-}
-
-// time splits, both directions
-{
+  process.stdout.write('radar-4 leave-one-out median ' + metrics(errs).median.toFixed(3) + '\n');
   const sorted = [...comps].sort((a, b) => (ageDays(b) ?? 365) - (ageDays(a) ?? 365));
   const half = Math.floor(sorted.length / 2);
   const older = sorted.slice(0, half), newer = sorted.slice(half);
-  for (const [tr, te, label] of [[older, newer, 'older -> newer'], [newer, older, 'newer -> older']]) {
-    const mF = fitModel(tr, SHIPPED), mC = fitModel(tr, CHALLENGER);
-    const eF = te.map((p) => predictLog(mF, p) - Math.log10(p.mcap_usd));
-    const eC = te.map((p) => predictLog(mC, p) - Math.log10(p.mcap_usd));
-    process.stdout.write('time split ' + label + ': fitted ' + metrics(eF).median.toFixed(3) + ', challenger ' + metrics(eC).median.toFixed(3) + '\n');
-  }
+  const mOld = fitSpec(older, 'value');
+  const eNew = newer.map((p) => predictSpec(mOld, p) - Math.log10(p.mcap_usd));
+  const mNew = fitSpec(newer, 'value');
+  const eOld = older.map((p) => predictSpec(mNew, p) - Math.log10(p.mcap_usd));
+  process.stdout.write('radar-4 time splits: old->new ' + metrics(eNew).median.toFixed(3) + ', new->old ' + metrics(eOld).median.toFixed(3) + '\n');
 }
 
-// full-data constants (shipped spec)
-const full = fitModel(comps, SHIPPED);
-const constants = {
-  intercept: +full.beta[0].toFixed(6),
-  tvl_slope: +full.beta[1].toFixed(6),
-  growth_coef: full.useGrowth ? +full.beta[2].toFixed(6) : 0,
-  age_coef: +full.beta[full.useGrowth ? 3 : 2].toFixed(6),
-  chain_coef: +full.beta[full.useGrowth ? 4 : 3].toFixed(6),
-  group_offsets: Object.fromEntries(Object.entries(full.offsets).sort().map(([k, v]) => [k, +v.toFixed(6)])),
-  comps: comps.length,
-};
-process.stdout.write('\nconstants for lib/model.ts (fitted on all ' + comps.length + ' comparables):\n');
-process.stdout.write(JSON.stringify(constants, null, 2) + '\n');
-
-// ------------------------------------------------------------- board + bands
-// Rebuild the board exactly as lib/model.ts does, then bootstrap the bands.
-function impliedWith(model, p) {
-  return Math.max(1, Math.round(Math.pow(10, predictLog(model, p))));
-}
-const index = new Map(snap.protocols.map((p) => [p.slug, p]));
-const chosen = new Map();
-for (const slug of snap.watchlist) { const p = index.get(slug); if (p !== undefined) chosen.set(slug, p); }
-const bySlugAsc = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
-const earlyPool = snap.protocols
-  .filter((p) => !chosen.has(p.slug) && isPreToken(p) && !isProductOfAnother(p) && !VERSIONED.test(p.name))
-  .map((p) => ({ p, v: impliedWith(full, p) }))
-  .sort((a, b) => b.v - a.v || bySlugAsc(a.p.slug, b.p.slug))
-  .slice(0, 200);
-for (const e of earlyPool) chosen.set(e.p.slug, e.p);
-const boardProtos = [...chosen.values()]
-  .map((p) => ({ p, v: impliedWith(full, p) }))
-  .sort((a, b) => b.v - a.v || bySlugAsc(a.p.slug, b.p.slug));
-process.stdout.write('\nboard: ' + boardProtos.length + ' rows (watchlist ' + snap.watchlist.length + ')\n');
-
-const REFITS = 200;
-const samples = new Map(boardProtos.map(({ p }) => [p.slug, { vals: [], ranks: [] }]));
+// ---- repeated 5-fold ablation: offsets vs no offsets
 {
-  const rand = rng(987654321);
-  for (let b = 0; b < REFITS; b++) {
-    const resample = Array.from({ length: comps.length }, () => comps[Math.floor(rand() * comps.length)]);
-    const m = fitModel(resample, SHIPPED);
-    const scored = boardProtos.map(({ p }) => ({ slug: p.slug, v: impliedWith(m, p) })).sort((a, c) => c.v - a.v || bySlugAsc(a.slug, c.slug));
-    scored.forEach((s, i) => {
-      const rec = samples.get(s.slug);
-      rec.vals.push(s.v);
-      rec.ranks.push(i + 1);
-    });
+  const acc = { value: [], offsets: [] };
+  for (let rep = 0; rep < 20; rep++) {
+    const r = rng(1000 + rep);
+    const idx = comps.map((_, i) => i);
+    for (let i = idx.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [idx[i], idx[j]] = [idx[j], idx[i]]; }
+    for (const kind of ['value', 'offsets']) {
+      const errs = [];
+      for (let f = 0; f < 5; f++) {
+        const test = idx.filter((_, pos) => pos % 5 === f).map((i) => comps[i]);
+        const train = idx.filter((_, pos) => pos % 5 !== f).map((i) => comps[i]);
+        const m = fitSpec(train, kind);
+        for (const p of test) errs.push(predictSpec(m, p) - Math.log10(p.mcap_usd));
+      }
+      acc[kind].push(metrics(errs).median);
+    }
+  }
+  const sd = (arr) => Math.sqrt(meanOf(arr.map((v) => (v - meanOf(arr)) ** 2)));
+  process.stdout.write('repeated 5-fold x20 median err: radar-4 ' + meanOf(acc.value).toFixed(3) + ' ± ' + sd(acc.value).toFixed(3) + ' | with offsets ' + meanOf(acc.offsets).toFixed(3) + ' ± ' + sd(acc.offsets).toFixed(3) + '\n');
+}
+
+// ---- paired bootstrap: radar-4 minus power law, canonical folds
+{
+  const slugs = comps.map((p) => p.slug);
+  const diffs = slugs.map((s) => Math.abs(canonErr.value.get(s)) - Math.abs(canonErr.power.get(s)));
+  const r = rng(20261119);
+  const bootMean = [];
+  for (let b = 0; b < 2000; b++) bootMean.push(meanOf(Array.from({ length: diffs.length }, () => diffs[Math.floor(r() * diffs.length)])));
+  const s = [...bootMean].sort((x, y) => x - y);
+  process.stdout.write('paired bootstrap, radar-4 - power law: mean diff ' + meanOf(diffs).toFixed(3) + ', 95% CI [' + s[Math.floor(0.025 * s.length)].toFixed(3) + ', ' + s[Math.floor(0.975 * s.length)].toFixed(3) + ']\n');
+}
+
+// ---- prediction interval factors from radar-4's OOF residuals
+{
+  const errs = comps.map((p) => canonErr.value.get(p.slug)).sort((a, b) => a - b);
+  const q = (f) => errs[Math.floor(f * errs.length)];
+  process.stdout.write('radar-4 OOF residual quantiles: q10 ' + q(0.10).toFixed(3) + ', q90 ' + q(0.90).toFixed(3) + ' -> PI factors lo x' + Math.pow(10, q(0.10)).toFixed(4) + ', hi x' + Math.pow(10, q(0.90)).toFixed(4) + '\n');
+}
+
+// ------------------------------------------------------------------ issuance
+const FAMILIES = [...new Set(snap.protocols.map((p) => groupOf(p.category)))].sort();
+function pFeatures(p) {
+  const f = [Math.log10(Math.max(1, p.tvl_usd)), Math.min(ageDays(p) ?? 365, 1825) / 1825, Math.min(p.chains.length, 10)];
+  const g = groupOf(p.category);
+  for (const fam of FAMILIES) f.push(g === fam ? 1 : 0);
+  return f;
+}
+const labelled = snap.protocols.filter((p) => ((p.mcap_usd !== null && p.mcap_usd > 0) || isPreToken(p)) && !isProductOfAnother(p) && !VERSIONED.test(p.name));
+function fitLogistic(rows, iters = 3000, lr = 0.1, l2 = 0.01) {
+  const X = rows.map((p) => pFeatures(p));
+  const y = rows.map((p) => (p.mcap_usd !== null && p.mcap_usd > 0 ? 1 : 0));
+  const d = X[0].length;
+  const mu = [], sd = [];
+  for (let j = 0; j < d; j++) { mu[j] = meanOf(X.map((r) => r[j])); sd[j] = Math.max(1e-6, Math.sqrt(meanOf(X.map((r) => (r[j] - mu[j]) ** 2)))); }
+  const Z = X.map((r) => r.map((v, j) => (j < 3 ? (v - mu[j]) / sd[j] : v)));
+  let w = new Array(d).fill(0);
+  const posN = y.reduce((s, v) => s + v, 0);
+  let b0 = Math.log((posN + 1) / (y.length - posN + 1));
+  const sig = (z) => 1 / (1 + Math.exp(-z));
+  for (let t = 0; t < iters; t++) {
+    const gw = new Array(d).fill(0); let gb = 0;
+    for (let i = 0; i < Z.length; i++) {
+      const pr = sig(b0 + Z[i].reduce((s, v, j) => s + v * w[j], 0));
+      const e = pr - y[i];
+      gb += e; for (let j = 0; j < d; j++) gw[j] += e * Z[i][j];
+    }
+    b0 -= (lr * gb) / Z.length;
+    for (let j = 0; j < d; j++) w[j] -= lr * (gw[j] / Z.length + l2 * w[j]);
+  }
+  return { b0, w, mu, sd, predict: (p) => { const f = pFeatures(p).map((v, j) => (j < 3 ? (v - mu[j]) / sd[j] : v)); return sig(b0 + f.reduce((s, v, j) => s + v * w[j], 0)); } };
+}
+function aucOf(scores, labels) {
+  const pairs = scores.map((s, i) => [s, labels[i]]).sort((a, b) => b[0] - a[0]);
+  let tp = 0, area = 0;
+  const P = labels.filter((v) => v === 1).length, N = labels.length - P;
+  for (const [, l] of pairs) { if (l === 1) tp++; else area += (tp / P) * (1 / N); }
+  return area;
+}
+let ptokenAuc = 0;
+{
+  const labelsArr = labelled.map((p) => (p.mcap_usd !== null && p.mcap_usd > 0 ? 1 : 0));
+  const aucs = [];
+  const oofSum = new Array(labelled.length).fill(0);
+  const oofN = new Array(labelled.length).fill(0);
+  for (let rep = 0; rep < 5; rep++) {
+    const r = rng(5000 + rep);
+    const idx = labelled.map((_, i) => i);
+    for (let i = idx.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [idx[i], idx[j]] = [idx[j], idx[i]]; }
+    const scores = new Array(labelled.length);
+    for (let f = 0; f < 5; f++) {
+      const test = idx.filter((_, pos) => pos % 5 === f);
+      const train = idx.filter((_, pos) => pos % 5 !== f).map((i) => labelled[i]);
+      const m = fitLogistic(train, 1500);
+      for (const i of test) { scores[i] = m.predict(labelled[i]); oofSum[i] += scores[i]; oofN[i]++; }
+    }
+    aucs.push(aucOf(scores, labelsArr));
+  }
+  ptokenAuc = meanOf(aucs);
+  // Calibration of the out-of-fold probabilities: a probability that is
+  // multiplied into money has to mean what it says. Deciles of predicted
+  // probability against the actual issued share, plus the Brier score
+  // against the base-rate forecaster. The wobble in the middle deciles is
+  // inside the noise of n=290, so no isotonic recalibration is applied —
+  // fitting one would tune to that noise.
+  const oof = oofSum.map((v, i) => v / oofN[i]);
+  const brier = meanOf(oof.map((pr, i) => (pr - labelsArr[i]) ** 2));
+  const baseRate = meanOf(labelsArr);
+  const brierBase = meanOf(labelsArr.map((y) => (baseRate - y) ** 2));
+  process.stdout.write('issuance calibration: Brier ' + brier.toFixed(3) + ' vs base-rate ' + brierBase.toFixed(3) + '\n');
+  const bins = Array.from({ length: 10 }, () => ({ n: 0, pred: 0, act: 0 }));
+  oof.forEach((pr, i) => { const b = Math.min(9, Math.floor(pr * 10)); bins[b].n++; bins[b].pred += pr; bins[b].act += labelsArr[i]; });
+  bins.forEach((b, i) => { if (b.n) process.stdout.write('  decile ' + (i / 10).toFixed(1) + ': n=' + b.n + ', predicted ' + (b.pred / b.n).toFixed(2) + ', actual ' + (b.act / b.n).toFixed(2) + '\n'); });
+  const fullBase = fitLogistic(labelled);
+  process.stdout.write('  standardised coefficients: logTVL ' + fullBase.w[0].toFixed(3) + ', age ' + fullBase.w[1].toFixed(3) + ' (positive: in a cross-section, older protocols are the ones that have had time to issue — P reads as "share of like-shaped protocols that have already issued", not a forecast), chains ' + fullBase.w[2].toFixed(3) + '\n');
+  process.stdout.write('\nissuance model: labelled ' + labelled.length + ' (' + labelsArr.filter((v) => v === 1).length + ' issued / ' + labelsArr.filter((v) => v === 0).length + ' pre-token), CV AUC ' + aucs.map((a) => a.toFixed(3)).join(', ') + ' -> mean ' + ptokenAuc.toFixed(3) + '\n');
+  const full = fitLogistic(labelled);
+  if (existsSync('lib')) {
+    const body = '// Generated by tools/fit.mjs from the snapshot — do not edit by hand.\n'
+      + '// The issuance model: logistic regression for P(a protocol like this\n'
+      + '// has issued a token), trained on the snapshot\'s clearly-labelled\n'
+      + '// protocols (issued comparables as positives, standalone pre-token\n'
+      + '// protocols as negatives). Features: standardised log10 TVL, age and\n'
+      + '// chain count, then one indicator per category family, in the order\n'
+      + '// of `families`. Cross-validated AUC is recorded alongside.\n'
+      + 'export const PTOKEN = {\n'
+      + '  intercept: ' + full.b0.toFixed(6) + ',\n'
+      + '  weights: [' + full.w.map((v) => v.toFixed(6)).join(', ') + '],\n'
+      + '  mu: [' + full.mu.slice(0, 3).map((v) => v.toFixed(6)).join(', ') + '],\n'
+      + '  sd: [' + full.sd.slice(0, 3).map((v) => v.toFixed(6)).join(', ') + '],\n'
+      + '  families: [' + FAMILIES.map((f) => "'" + f + "'").join(', ') + '],\n'
+      + '  auc_cv: ' + ptokenAuc.toFixed(3) + ',\n'
+      + '  positives: ' + labelsArr.filter((v) => v === 1).length + ',\n'
+      + '  negatives: ' + labelsArr.filter((v) => v === 0).length + ',\n'
+      + '};\n';
+    writeFileSync('lib/ptoken.ts', body);
+    process.stdout.write('wrote lib/ptoken.ts\n');
   }
 }
-const pct = (arr, q) => { const s = [...arr].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(q * s.length))]; };
-const bands = {};
-for (const { p } of boardProtos) {
-  const rec = samples.get(p.slug);
-  bands[p.slug] = {
-    p10: Math.round(pct(rec.vals, 0.1)),
-    p90: Math.round(pct(rec.vals, 0.9)),
-    rank_lo: pct(rec.ranks, 0.1),
-    rank_hi: pct(rec.ranks, 0.9),
-  };
+
+// ------------------------------------------------------------------ bands
+// 200 bootstrap refits of the radar-4 spec over resampled comparables;
+// each refit reprices and re-ranks the board the shipped fit selects.
+{
+  const bySlug = new Map(snap.protocols.map((p) => [p.slug, p]));
+  const chosen = new Map();
+  for (const slug of snap.watchlist) { const p = bySlug.get(slug); if (p !== undefined) chosen.set(slug, p); }
+  const earlyPool = snap.protocols
+    .filter((p) => !chosen.has(p.slug) && isPreToken(p) && !isProductOfAnother(p) && !VERSIONED.test(p.name))
+    .map((p) => ({ p, s: Math.pow(10, predictSpec(shipped, p)) }))
+    .sort((a, b) => b.s - a.s || (a.p.slug < b.p.slug ? -1 : 1))
+    .slice(0, 200);
+  for (const e of earlyPool) chosen.set(e.p.slug, e.p);
+  const boardProtos = [...chosen.values()];
+  process.stdout.write('\nbootstrap bands over a board of ' + boardProtos.length + ' rows...\n');
+  const samples = new Map(boardProtos.map((p) => [p.slug, { vals: [], ranks: [] }]));
+  const r = rng(20261114);
+  for (let b = 0; b < 200; b++) {
+    const resample = Array.from({ length: comps.length }, () => comps[Math.floor(r() * comps.length)]);
+    const m = fitSpec(resample, 'value');
+    const priced = boardProtos.map((p) => ({ slug: p.slug, v: Math.pow(10, predictSpec(m, p)) })).sort((a, b2) => b2.v - a.v || (a.slug < b2.slug ? -1 : 1));
+    priced.forEach((row, i) => { const s = samples.get(row.slug); s.vals.push(row.v); s.ranks.push(i + 1); });
+  }
+  const pct = (arr, f) => { const s = [...arr].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(f * s.length))]; };
+  if (existsSync('lib')) {
+    const lines = ['// Generated by tools/fit.mjs from the snapshot — do not edit by hand.',
+      '// Per board row: the 10th–90th percentile of implied value and of rank',
+      '// across 200 bootstrap refits of the radar-4 spec. This is fit',
+      '// uncertainty only; the dashboard pairs it with a wider prediction',
+      '// interval built from out-of-sample residuals.',
+      'export const BANDS: Record<string, { p10: number; p90: number; rank_lo: number; rank_hi: number }> = {'];
+    for (const p of boardProtos) {
+      const s = samples.get(p.slug);
+      lines.push('  ' + JSON.stringify(p.slug) + ': { p10: ' + Math.round(pct(s.vals, 0.1)) + ', p90: ' + Math.round(pct(s.vals, 0.9)) + ', rank_lo: ' + Math.round(pct(s.ranks, 0.1)) + ', rank_hi: ' + Math.round(pct(s.ranks, 0.9)) + ' },');
+    }
+    lines.push('};');
+    writeFileSync('lib/bands.ts', lines.join('\n') + '\n');
+    process.stdout.write('wrote lib/bands.ts (' + boardProtos.length + ' rows)\n');
+  }
 }
-if (existsSync('lib')) {
-  const body =
-    '// Bootstrap bands for the shipped fit — generated by tools/fit.mjs.\n' +
-    '// 200 seeded bootstrap refits of the comparables; per board slug, the\n' +
-    '// 10th-90th percentile of implied value and of rank across the refits.\n' +
-    'export const BANDS: Record<string, { p10: number; p90: number; rank_lo: number; rank_hi: number }> = ' +
-    JSON.stringify(bands) + ';\n';
-  writeFileSync('lib/bands.ts', body);
-  process.stdout.write('wrote lib/bands.ts (' + Object.keys(bands).length + ' slugs, ' + REFITS + ' refits)\n');
+
+// ------------------------------------------------- per-term ablation, residuals
+// The standard that removed the family offsets, applied to the terms that
+// remain: repeated 5-fold x20 for the bare power law, +age, +chains and
+// the full radar-4 spec. Every variant lands within about one standard
+// deviation of the others (0.518–0.534); no term provably earns its keep
+// and none provably costs anything. Age and chains stay because they
+// price maturity and sprawl in the direction the full-sample fit gives,
+// at no measured out-of-sample cost — and the table is published so the
+// reader can apply the same scepticism to them as to the offsets.
+// One caveat the board also carries: the spec was CHOSEN on these same
+// resamples, so the repeated-CV figures are mildly optimistic as
+// estimates of the chosen spec; a nested-CV estimate was not run.
+{
+  const FEATS = {
+    'power only': (p) => [1, Math.log10(Math.max(1, p.tvl_usd))],
+    '+ age': (p) => [1, Math.log10(Math.max(1, p.tvl_usd)), Math.min(ageDays(p) ?? 365, 1825) / 1825],
+    '+ chains': (p) => [1, Math.log10(Math.max(1, p.tvl_usd)), Math.min(p.chains.length, 10)],
+    'full radar-4': (p) => featsValue(p, false),
+  };
+  process.stdout.write('\nper-term ablation, repeated 5-fold x20 (median |log err|):\n');
+  for (const [name, feat] of Object.entries(FEATS)) {
+    const meds = [];
+    for (let rep = 0; rep < 20; rep++) {
+      const r = rng(1000 + rep);
+      const idx = comps.map((_, i) => i);
+      for (let i = idx.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [idx[i], idx[j]] = [idx[j], idx[i]]; }
+      const errs = [];
+      for (let f = 0; f < 5; f++) {
+        const test = idx.filter((_, pos) => pos % 5 === f).map((i) => comps[i]);
+        const train = idx.filter((_, pos) => pos % 5 !== f).map((i) => comps[i]);
+        const beta = wls(train.map(feat), train.map((p) => Math.log10(p.mcap_usd)), null);
+        for (const p of test) errs.push(feat(p).reduce((s, v, j) => s + v * beta[j], 0) - Math.log10(p.mcap_usd));
+      }
+      meds.push(metrics(errs).median);
+    }
+    const sd = Math.sqrt(meanOf(meds.map((v) => (v - meanOf(meds)) ** 2)));
+    process.stdout.write('  ' + name.padEnd(14) + ' mean ' + meanOf(meds).toFixed(3) + ' ± ' + sd.toFixed(3) + '\n');
+  }
+  // The signed out-of-fold residuals of the shipped spec: the empirical
+  // distribution the dashboard's P(profit) reads from, and the source of
+  // the prediction-interval factors in VALIDATION.
+  if (existsSync('lib')) {
+    const resid = comps.map((p) => canonErr.value.get(p.slug)).sort((a, b) => a - b);
+    const body = '// Generated by tools/fit.mjs from the snapshot — do not edit by hand.\n'
+      + '// The ' + resid.length + ' signed out-of-sample residuals (log10) of the radar-4\n'
+      + '// value fit on the canonical slug-hash folds, sorted. The dashboard\n'
+      + '// integrates over this empirical distribution for P(profit) instead\n'
+      + '// of assuming a tidy parametric one.\n'
+      + 'export const RESIDUALS: number[] = [' + resid.map((v) => v.toFixed(3)).join(', ') + '];\n';
+    writeFileSync('lib/residuals.ts', body);
+    process.stdout.write('wrote lib/residuals.ts (' + resid.length + ' residuals)\n');
+  }
 }

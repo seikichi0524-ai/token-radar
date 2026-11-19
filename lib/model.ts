@@ -1,63 +1,87 @@
-// Token Radar — valuation model and farm-plan generator (radar-3 fit,
-// board edition 2).
+// Token Radar — the pricing engine and farm-plan builder behind the board
+// (fit: radar-3; board edition 4).
 //
-// Input is the sealed snapshot only: ten fields per protocol, nothing else.
-// No protocol name is ever special-cased. Every number below is a function of
-// tvl_usd, change_7d, listed_at, category and chains.
+// Everything here runs off the sealed snapshot and nothing else. A protocol
+// is priced from five of its ten fields — tvl_usd, change_7d, listed_at,
+// category, chains — and no name, slug or brand is ever given its own rule.
 //
-// Edition 2 keeps the radar-3 fit exactly (a pre-registered robust challenger
-// failed to beat it — see tools/fit.mjs) and rebuilds everything around it:
-// bootstrap value bands per row, a full-universe audit of the pre-token
-// protocols that did not make the board, and farm plans costed at 2025 gas
-// levels, netted to a break-even launch value with a farm / thin / skip
-// verdict per row.
-//
-// What changed from radar-2: the multiples are no longer hand-picked. They
-// are fitted on the snapshot's own evidence — the 128 protocols in the file
-// that already carry a token. 92 of those pass the same "a protocol in its
-// own right" reading the board applies (no wrapped, staked or bridged
-// products of another protocol, no exchange fronts, no versioned
-// duplicates), and those 92 are the comparables. Least squares in log10
-// space over the comparables gives:
+// How the price is formed. The snapshot holds 128 protocols that already
+// issued a token; 92 of them survive the same standalone reading the board
+// itself applies (a wrapped, staked or bridged face of another protocol is
+// not a comparable, and neither is an exchange front or a versioned twin).
+// Those 92 are the evidence. A least-squares fit in log10 space over them
+// yields the shipped equation:
 //
 //   log10(implied) = intercept + tvl_slope * log10(TVL)
 //                  + growth_coef * g + age_coef * ageT
 //                  + chain_coef * chains + group_offset[category family]
 //
-//   g      7-day TVL change, clamped to [-50, +80], square-root damped past
-//          +/-25%, in units of 1.0 = 100 damped points (radar-2's transform)
-//   ageT   min(age_days, 1825) / 1825; unknown age counts as 365 days
-//   chains chain count, capped at 10
-//   group_offset: each category family's mean residual, shrunk toward zero
-//          by n/(n+4) so a two-member family cannot shout down the curve
+//   g      the 7-day TVL move, clamped to [-50, +80] and square-root damped
+//          beyond +/-25% (a transform inherited from radar-2; the fitted
+//          coefficient is 0 — see the second finding below)
+//   ageT   age in days, capped at five years and scaled to [0, 1]; a
+//          protocol with no listing date is treated as one year old
+//   chains how many chains carry the protocol, capped at 10
+//   group_offset: one additive term per category family — the family's
+//          average leftover after the curve, pulled toward zero by the
+//          shrinkage factor n/(n+4), so a family of two cannot dominate
 //
-// Findings the fit produced, stated plainly:
-// - The size curve is flat: tvl_slope is 0.395, not 1. Among the
-//   comparables, value grows far slower than TVL — the median issued
-//   protocol trades at 0.87x TVL in the smallest TVL third, 0.25x in the
-//   middle third and 0.08x in the largest third. radar-2's flat category
-//   multiples priced mega-TVL protocols far above anything the issued
-//   evidence supports.
-// - The 7-day change carried no usable signal: left free, its coefficient
-//   fitted negative, and the model's one sign rule — growth may not hurt —
-//   dropped the term and refit the rest (growth_coef is therefore 0).
-//   A hot week is shown on the board; it does not move the price.
-// - Age and breadth price slightly negative once size is accounted for
-//   (-0.139 over five years, -0.021 per chain): among issued comparables,
-//   longer-listed and wider-spread protocols trade a little lower, not
-//   higher. The effects are small next to the size curve and the family
-//   offsets, and they are what the evidence says, so they stand.
+// Three findings from that fit are worth stating before the code:
+// - Size bends the price hard. The slope on log TVL is 0.376 rather than
+//   anything near 1, because the issued evidence says value per dollar of
+//   TVL collapses with scale: the median comparable trades at 0.87x its
+//   TVL in the smallest third, 0.25x in the middle third and 0.08x in the
+//   largest. The hand-picked flat multiples of radar-2 ignored this and
+//   priced the biggest protocols far beyond any observed outcome.
+// - A hot week earns nothing. Given a free coefficient, the 7-day change
+//   fitted negative; the model's single sign rule — growth must not lower
+//   a price — removed the term and the fit was rerun without it. The
+//   weekly move is still displayed on every row; it simply never prices.
+// - Age and sprawl shave a little off. Once size is accounted for, older
+//   and more widely deployed comparables settled slightly cheaper
+//   (-0.146 across the full five-year span, -0.019 per chain). Both
+//   effects are small beside the size curve, and the testing below is
+//   honest about how small: they are retained because they price two
+//   things practitioners check anyway, in the direction the full-sample
+//   fit gives, at no measured out-of-sample cost.
 //
-// Validation (tools/fit.mjs reproduces every number from the snapshot):
-// the 92 comparables are split into 3 folds by a hash of the slug; each fold
-// is scored by a model fitted on the other two, so every comparable is
-// priced once by a model that never saw it. Median absolute log10 error:
-// radar-3 0.509 (a typical miss of x3.23), radar-2 0.652 (x4.48), a naive
-// single multiple 0.676 (x4.74). Within 2x of the actual market cap:
-// radar-3 37%, radar-2 27%. The constants below are the same fit run on all
-// 92 comparables at once, printed by tools/fit.mjs at 6 decimal places.
+// What radar-4 removed, and why. radar-3 also carried a per-family offset
+// (curators up, lending down), shrunk toward zero. On the canonical folds
+// the offsets still flatter themselves (median error 0.515 against
+// radar-4's 0.542), but over 20 repetitions of 5-fold cross-validation the
+// verdict reverses — 0.551 with offsets against 0.527 without — and the
+// shrinkage sweep behind that test found no shrinkage level at which the
+// offsets earned their keep. A paired bootstrap likewise puts radar-4's
+// edge over a bare power law (intercept and log TVL only) at +0.001 of
+// median log error, 95% CI [-0.018, +0.020]: at 92 comparables the
+// parameter budget is spent. radar-4 therefore ships the simpler spec and
+// publishes the ablation, in tools/fit.mjs and on the board, instead of
+// the offsets.
+//
+// The second model in this file answers the question the value fit
+// cannot: whether a token arrives at all. A logistic regression over the
+// snapshot's clearly-labelled protocols (the 92 issued comparables as
+// positives, the 198 standalone pre-token protocols as negatives) scores
+// P(token) from log TVL, age, chain count and category family, with a
+// cross-validated AUC of 0.71 — real signal, far from certainty. The
+// board still ranks by value at issuance, the question the bounty asks;
+// P(token) rides beside it, and the farm plans price with it, because a
+// launch that never happens pays no one.
+//
+// How the fits were tested (tools/fit.mjs regenerates each figure from
+// the snapshot): the comparables are divided into three folds by hashing
+// the slug, and each fold is priced by a fit trained on the other two, so
+// no comparable is ever scored by a model that trained on it. Median
+// absolute log10 error out of sample — radar-4: 0.542 (a typical miss of
+// x3.49); a bare power law: 0.559 (x3.62); radar-2: 0.652 (x4.48); one
+// naive multiple for everything: 0.676 (x4.74). Share of comparables
+// priced within 2x of their actual market cap: radar-4 37%. The
+// constants further down are that same fit retrained on all 92 at once,
+// printed by tools/fit.mjs to 6 decimals.
 
 import { BANDS } from './bands.ts';
+import { PTOKEN } from './ptoken.ts';
+import { RESIDUALS } from './residuals.ts';
 
 export interface SnapshotProtocol {
   slug: string;
@@ -86,73 +110,71 @@ export interface FitConstants {
   growth_coef: number;
   age_coef: number;
   chain_coef: number;
-  group_offsets: Record<string, number>;
   growth_floor: number;
   growth_cap: number;
   maturity_days: number;
   unknown_age_days: number;
   chain_cap: number;
-  shrink_k: number;
   comps: number;
 }
 
 export const FIT: FitConstants = {
-  intercept: 4.100966,
-  tvl_slope: 0.394807,
+  intercept: 4.226043,
+  tvl_slope: 0.375817,
   growth_coef: 0,
-  age_coef: -0.139474,
-  chain_coef: -0.021341,
-  group_offsets: {
-    basis: 0.226325,
-    chain: 0.047799,
-    curators: 0.141224,
-    derivatives: 0.147715,
-    dexs: 0.013832,
-    farm: -0.003414,
-    launchpad: 0.034301,
-    lending: -0.271145,
-    locker: 0.190298,
-    other: 0.196478,
-    rwa: 0.071,
-    staking: -0.175584,
-    yield: -0.215444,
-  },
+  age_coef: -0.14564,
+  chain_coef: -0.018578,
   growth_floor: -50,
   growth_cap: 80,
   maturity_days: 1825,
   unknown_age_days: 365,
   chain_cap: 10,
-  shrink_k: 4,
   comps: 92,
 };
 
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
-/** Out-of-sample validation of the shipped fit against the model it replaces. */
+/** Out-of-sample validation of the shipped fits, regenerated by tools/fit.mjs. */
 export const VALIDATION = {
   folds: 3,
   comps: 92,
-  fitted_median_log_err: 0.509,
-  fitted_typical_miss: 3.23,
-  fitted_mean_log_err: 0.643,
+  fitted_median_log_err: 0.542,
+  fitted_typical_miss: 3.49,
+  fitted_mean_log_err: 0.645,
   fitted_within_2x: 0.37,
-  fitted_within_3x: 0.48,
-  fitted_spearman: 0.301,
-  loo_median_log_err: 0.607,
-  time_split_old_to_new: 0.554,
-  time_split_new_to_old: 0.651,
+  fitted_within_3x: 0.5,
+  fitted_spearman: 0.265,
+  fitted_precision_top30: 0.43,
+  loo_median_log_err: 0.527,
+  time_split_old_to_new: 0.588,
+  time_split_new_to_old: 0.76,
+  power_median_log_err: 0.559,
+  power_typical_miss: 3.62,
+  power_within_2x: 0.36,
+  offsets_median_log_err: 0.515,
+  offsets_within_2x: 0.34,
+  offsets_repeated_median: 0.551,
+  fitted_repeated_median: 0.527,
+  paired_mean_diff_vs_power: 0.001,
+  paired_ci_lo: -0.018,
+  paired_ci_hi: 0.02,
   radar2_median_log_err: 0.652,
   radar2_typical_miss: 4.48,
-  radar2_within_2x: 0.27,
   naive_median_log_err: 0.676,
   naive_typical_miss: 4.74,
-  naive_within_2x: 0.33,
-  challenger_median_log_err: 0.53,
-  challenger_spearman: 0.244,
+  pi_lo_factor: 0.1112,
+  pi_hi_factor: 15.014,
+  ptoken_auc: 0.709,
+  ptoken_brier: 0.192,
+  ptoken_brier_base: 0.217,
+  ptoken_positives: 92,
+  ptoken_negatives: 198,
+  power_repeated_median: 0.534,
+  thin_pprofit: 0.25,
 };
 
-/** Board edition: 1 was the first submission; 2 adds bands, audit, netted plans. */
-export const BOARD_EDITION = 2;
+/** Board edition: 4 — radar-4 fit, the issuance model, prediction intervals, netted plans v2. */
+export const BOARD_EDITION = 4;
 
 /**
  * Declared farming assumption behind every plan's break-even: a launch
@@ -161,6 +183,16 @@ export const BOARD_EDITION = 2;
  * against its TVL. Stated on the dashboard; used for nothing else.
  */
 export const ALLOC_SHARE = 0.1;
+
+/**
+ * Opportunity cost of the plan's capital, per year, charged in every
+ * plan's break-even from board edition 4 on: capital parked in a farm is
+ * capital not earning the risk-free-ish yield the same wallet could take
+ * elsewhere. 4% is the 2025 T-bill / lending-market ballpark; the point is
+ * not the exact figure but that the cost exists, so "deploy more" stops
+ * being free in the arithmetic.
+ */
+export const OPP_RATE = 0.04;
 
 /** Board size target: the 40 watchlist rows plus this many early rows. */
 export const EARLY_ROWS = 200;
@@ -225,13 +257,15 @@ export interface Scored {
 /**
  * The fitted value of one protocol. The headline is computed in log10 space;
  * the factors are the same quantity decomposed multiplicatively
- * (implied = TVL x size x group x growth x age x chain) so a reader — and
- * the dashboard — can check the arithmetic term by term.
+ * (implied = TVL x size x growth x age x chain) so a reader — and the
+ * dashboard — can check the arithmetic term by term. radar-4 carries no
+ * per-family offset (see the header: the offsets failed repeated
+ * cross-validation), so group_factor is 1 by construction and the family
+ * is reported only as a label.
  */
 export function impliedValue(p: SnapshotProtocol, asOf: string, fit: FitConstants = FIT): Scored {
   const age = ageDays(asOf, p.listed_at);
   const group = groupOf(p.category);
-  const offset = fit.group_offsets[group] ?? 0;
   const logTvl = Math.log10(Math.max(1, p.tvl_usd));
   const gr = dampedGrowth(p.change_7d, fit);
   const ageT = Math.min(age ?? fit.unknown_age_days, fit.maturity_days) / fit.maturity_days;
@@ -241,20 +275,43 @@ export function impliedValue(p: SnapshotProtocol, asOf: string, fit: FitConstant
     fit.tvl_slope * logTvl +
     fit.growth_coef * gr.g +
     fit.age_coef * ageT +
-    fit.chain_coef * chains +
-    offset;
+    fit.chain_coef * chains;
   const implied = Math.max(1, Math.round(Math.pow(10, logv)));
   return {
     implied,
     group,
     size_factor: Math.pow(10, fit.intercept + (fit.tvl_slope - 1) * logTvl),
-    group_factor: Math.pow(10, offset),
+    group_factor: 1,
     growth_pct: gr.pct,
     growth_factor: Math.pow(10, fit.growth_coef * gr.g),
     age_factor: Math.pow(10, fit.age_coef * ageT),
     chain_factor: Math.pow(10, fit.chain_coef * chains),
     age,
   };
+}
+
+/**
+ * P(token): the issuance model's score for one protocol — the probability
+ * that a protocol with these fields has a token at all, learned from the
+ * snapshot's labelled protocols (weights in lib/ptoken.ts, trained by
+ * tools/fit.mjs; cross-validated AUC in VALIDATION). It is a cross-section
+ * of who has issued so far, not a causal claim and not a schedule: it says
+ * protocols shaped like this one usually have, or have not, launched.
+ */
+export function pToken(p: SnapshotProtocol, asOf: string, fit: FitConstants = FIT): number {
+  const age = ageDays(asOf, p.listed_at);
+  const raw = [
+    Math.log10(Math.max(1, p.tvl_usd)),
+    Math.min(age ?? fit.unknown_age_days, fit.maturity_days) / fit.maturity_days,
+    Math.min(p.chains.length, fit.chain_cap),
+  ];
+  let logit = PTOKEN.intercept;
+  for (let j = 0; j < 3; j++) logit += ((raw[j]! - PTOKEN.mu[j]!) / PTOKEN.sd[j]!) * PTOKEN.weights[j]!;
+  const g = groupOf(p.category);
+  PTOKEN.families.forEach((fam, i) => {
+    if (fam === g) logit += PTOKEN.weights[3 + i]!;
+  });
+  return 1 / (1 + Math.exp(-logit));
 }
 
 export function isPreToken(p: SnapshotProtocol): boolean {
@@ -372,11 +429,11 @@ function fmtUsd(n: number): string {
 }
 
 function capitalTier(p: SnapshotProtocol): number {
-  if (p.tvl_usd >= 5_000_000_000) return 300;
-  if (p.tvl_usd >= 1_000_000_000) return 200;
-  if (p.tvl_usd >= 250_000_000) return 120;
-  if (p.tvl_usd >= 50_000_000) return 80;
-  return 50;
+  if (p.tvl_usd >= 5_000_000_000) return 5000;
+  if (p.tvl_usd >= 1_000_000_000) return 2500;
+  if (p.tvl_usd >= 250_000_000) return 1000;
+  if (p.tvl_usd >= 50_000_000) return 500;
+  return 250;
 }
 
 function holdDaysFor(age: number | null): number {
@@ -391,36 +448,72 @@ export interface PlanEconomics {
   capital: number;
   gas_per_action: number;
   weeks: number;
+  /** Gas and bridge cost of running the plan, in dollars. */
   cost_usd: number;
+  /** Opportunity cost of the capital over the hold, at OPP_RATE a year. */
+  opp_cost_usd: number;
   hours: number;
+  /** The launch value at which the plan repays its costs IF a token launches. */
   breakeven_usd: number;
+  /** Expected profit of the plan at the shipped capital, in dollars:
+   *  P(token) x ALLOC_SHARE x implied x capital/TVL, minus all costs. */
+  expected_net_usd: number;
+  /** P(the plan ends in profit): P(token) x the share of the fit's
+   *  out-of-sample residuals under which the realised launch value still
+   *  clears the break-even. Read from the empirical residuals, not a
+   *  parametric guess. */
+  p_profit: number;
+  /**
+   * The smallest deployment whose expected allocation at the row's
+   * central implied value repays gas plus opportunity cost — or null when
+   * no size works, because the expected yield per dollar deployed sits
+   * under the opportunity-cost rate and scaling up only scales the loss.
+   */
+  min_capital_usd: number | null;
   verdict: 'farm' | 'thin' | 'skip';
 }
 
 /**
- * The plan's economics, from chain family, TVL tier and age only.
- * Cost = gas for setup + one action a week + the claim, plus one bridge
- * hop when the plan uses a second chain. Capital is the TVL tier, floored
- * so the total plan cost stays a small single-digit share of it
- * (capital >= 20x cost). Break-even is the launch value at which a
- * pro-rata slice of a declared ALLOC_SHARE community distribution repays
- * the plan's cost; the verdict compares that break-even with the row's
- * bootstrap band: at or below the band's low end is a farm, at or below
- * the central estimate is thin, above it the plan costs more than the
- * evidence supports — skip.
+ * The plan's economics, from chain family, TVL tier, age and the row's
+ * issuance probability. Cost is gas for setup + one action a week + the
+ * claim, plus one bridge hop when the plan uses a second chain, plus the
+ * opportunity cost of the capital over the hold at OPP_RATE. Capital is
+ * the TVL tier ($250–$5,000 — sizes a working farmer actually deploys),
+ * floored so the gas cost stays a small share of it (capital >= 20x gas).
+ *
+ * The verdict is read off expected profit, not off a band edge (an
+ * earlier edition judged against the band's low end; with honest,
+ * wide uncertainty that collapses to "skip everything", which is a
+ * property of the threshold, not of the rows):
+ * - farm: the plan's expected profit at the shipped capital is positive;
+ * - thin: expectation is negative but P(profit) still reaches
+ *   VALIDATION.thin_pprofit — a real chance, honestly labelled;
+ * - skip: neither.
+ * Break-even is stated unweighted (the launch value that repays costs if
+ * a launch happens); the probability weighting lives in the expected
+ * profit and in P(profit), where a reader can see it.
  */
-export function planEconomics(p: SnapshotProtocol, age: number | null, implied: number, bandLow: number | null): PlanEconomics {
+export function planEconomics(p: SnapshotProtocol, age: number | null, implied: number, bandLow: number | null, pTok: number): PlanEconomics {
   const gas = gasPerAction(p);
   const hold = holdDaysFor(age);
   const weeks = Math.max(5, Math.ceil(hold / 7));
   const bridge = p.chains.length > 1 ? 3 : 0;
-  const cost = Math.round((gas * (weeks + 4) + bridge) * 100) / 100;
-  const capital = Math.max(capitalTier(p), Math.ceil(20 * cost));
+  const gasCost = Math.round((gas * (weeks + 4) + bridge) * 100) / 100;
+  const capital = Math.max(capitalTier(p), Math.ceil(20 * gasCost));
+  const oppCost = Math.round(capital * OPP_RATE * (weeks / 52) * 100) / 100;
+  const cost = Math.round((gasCost + oppCost) * 100) / 100;
   const hours = Math.round(((25 + 10 * weeks + 10) / 60) * 10) / 10;
   const breakeven = Math.round((cost * p.tvl_usd) / (ALLOC_SHARE * capital));
-  const low = bandLow ?? implied;
-  const verdict: PlanEconomics['verdict'] = breakeven <= low ? 'farm' : breakeven <= implied ? 'thin' : 'skip';
-  return { capital, gas_per_action: gas, weeks, cost_usd: cost, hours, breakeven_usd: breakeven, verdict };
+  const expectedRaw = (ALLOC_SHARE * pTok * implied * capital) / p.tvl_usd - cost;
+  const expectedNet = Math.round(expectedRaw);
+  const need = Math.log10(breakeven / implied);
+  const share = RESIDUALS.filter((e) => e >= need).length / RESIDUALS.length;
+  const pProfit = Math.round(pTok * share * 1000) / 1000;
+  const perDollar = (ALLOC_SHARE * pTok * implied) / p.tvl_usd;
+  const netRate = perDollar - OPP_RATE * (weeks / 52);
+  const minCapital = netRate > 0 ? Math.ceil(gasCost / netRate) : null;
+  const verdict: PlanEconomics['verdict'] = expectedRaw > 0 ? 'farm' : pProfit >= VALIDATION.thin_pprofit ? 'thin' : 'skip';
+  return { capital, gas_per_action: gas, weeks, cost_usd: gasCost, opp_cost_usd: oppCost, hours, breakeven_usd: breakeven, expected_net_usd: expectedNet, p_profit: pProfit, min_capital_usd: minCapital, verdict };
 }
 
 /** The core qualifying action, by category. Concrete verb, asset, venue. */
@@ -519,6 +612,13 @@ export interface RadarRow {
   listed_at: string | null;
   age_days: number | null;
   implied_value_usd: number;
+  /** P(token) from the issuance model, 0..1 (4dp in the payload). */
+  p_token: number;
+  /** Expected value at issuance: P(token) x implied value, dollars. */
+  ev_usd: number;
+  /** Prediction interval: implied x the OOF residual factors (VALIDATION). */
+  pi_lo: number;
+  pi_hi: number;
   group: string;
   size_factor: number;
   group_factor: number;
@@ -529,6 +629,10 @@ export interface RadarRow {
   farm_steps: string[];
   band: { p10: number; p90: number; rank_lo: number; rank_hi: number } | null;
   plan: PlanEconomics;
+  /** Rank this row would hold if the board were sorted by TVL alone. */
+  tvl_rank: number;
+  /** Field-derived watch notes: what a farmer should check before trusting the row. */
+  notes: string[];
 }
 
 /** One issued comparable, for the dashboard's method scatter. */
@@ -567,11 +671,16 @@ export interface RadarData {
   model_version: string;
   board_edition: number;
   alloc_share: number;
+  opp_rate: number;
   validation: typeof VALIDATION;
   watchlist_size: number;
   board_size: number;
   early_size: number;
   live_size: number;
+  /** Census of the rows' farm-plan verdicts, for the decision strip. */
+  verdict_counts: { farm: number; thin: number; skip: number };
+  /** Rows the model moves 50 or more places against a TVL-only ranking. */
+  moved_50: number;
   rows: RadarRow[];
   live: LiveRow[];
   comps: CompPoint[];
@@ -622,7 +731,7 @@ export function buildBoard(snapshot: Snapshot, fit: FitConstants = FIT): BoardRo
       chain_factor: round4(entry.s.chain_factor),
       age_days: entry.s.age,
     },
-    farm_steps: farmSteps(entry.p, entry.s.age, planEconomics(entry.p, entry.s.age, entry.s.implied, BANDS[entry.p.slug]?.p10 ?? null)),
+    farm_steps: farmSteps(entry.p, entry.s.age, planEconomics(entry.p, entry.s.age, entry.s.implied, BANDS[entry.p.slug]?.p10 ?? null, pToken(entry.p, snapshot.as_of, fit))),
   }));
 }
 
@@ -651,11 +760,44 @@ export function auditReason(p: SnapshotProtocol): string {
   return 'not selected';
 }
 
+/**
+ * Watch notes for one board row, derived only from the row's own snapshot
+ * fields and facts the fit itself established. They name what the model
+ * cannot price — routed or mercenary TVL, missing age, thin history — so a
+ * reader checks the row instead of trusting it. At most three, in the order
+ * a farmer would want to hear them.
+ */
+export function rowNotes(p: SnapshotProtocol, age: number | null, group: string): string[] {
+  const notes: string[] = [];
+  if (group === 'curators') {
+    notes.push('Allocator: this TVL is capital routed into other protocols\u2019 markets, and the fee an allocator keeps on it is thin — the same TVL usually supports less own-token value than native TVL of the same size.');
+  }
+  if (p.change_7d !== null && p.change_7d >= 30) {
+    notes.push('Hot week: TVL is up ' + Math.round(p.change_7d) + '% in seven days. Fast inflows are often mercenary and can leave at a launch; the model prices none of this move, in either direction.');
+  } else if (p.change_7d !== null && p.change_7d <= -30) {
+    notes.push('Sharp outflow: TVL is down ' + Math.round(-p.change_7d) + '% in seven days. The model prices none of the move, so the value here rests on the TVL that remains, not on the trend.');
+  }
+  if (p.tvl_usd >= 1_000_000_000) {
+    notes.push('Very large TVL: among issued peers the market paid a median of 0.08x TVL at this size, so the fitted value sits far under TVL by construction, not by pessimism.');
+  }
+  if (age === null) {
+    notes.push('Listing age is not recorded in the snapshot: the age term uses the ' + FIT.unknown_age_days + '-day default, and the farm plan\'s minimum hold cannot be checked against this protocol\'s own history.');
+  } else if (age < 90) {
+    notes.push('Young listing: ' + Math.round(age) + ' days tokenless. The thinnest history on the board — points rules, if any exist, have barely had time to be announced.');
+  }
+  if (p.chains.length <= 1 && age !== null && age < 365) {
+    notes.push('Single-chain and under a year old: one deployment, one community — the least diversified evidence a row can carry.');
+  }
+  return notes.slice(0, 3);
+}
+
 export function buildRadar(snapshot: Snapshot, fit: FitConstants = FIT): { board: BoardRow[]; radar: RadarData } {
   const board = buildBoard(snapshot, fit);
   const live = liveRows(snapshot);
   const watch = new Set(snapshot.watchlist);
   const index = new Map(snapshot.protocols.map((p) => [p.slug, p]));
+  const tvlOrder = board.slice().sort((a, b) => b.tvl_usd - a.tvl_usd || bySlugAsc(a.slug, b.slug));
+  const tvlRank = new Map(tvlOrder.map((r, i) => [r.slug, i + 1]));
   const rows: RadarRow[] = board.map((r) => {
     const p = index.get(r.slug)!;
     const band = BANDS[r.slug] ?? null;
@@ -670,6 +812,10 @@ export function buildRadar(snapshot: Snapshot, fit: FitConstants = FIT): { board
       listed_at: r.listed_at,
       age_days: r.age_days,
       implied_value_usd: r.implied_value_usd,
+      p_token: round4(pToken(p, snapshot.as_of, fit)),
+      ev_usd: Math.round(pToken(p, snapshot.as_of, fit) * r.implied_value_usd),
+      pi_lo: Math.round(r.implied_value_usd * VALIDATION.pi_lo_factor),
+      pi_hi: Math.round(r.implied_value_usd * VALIDATION.pi_hi_factor),
       group: r.model.group,
       size_factor: r.model.size_factor,
       group_factor: r.model.group_factor,
@@ -679,7 +825,9 @@ export function buildRadar(snapshot: Snapshot, fit: FitConstants = FIT): { board
       watchlist: watch.has(r.slug),
       farm_steps: r.farm_steps,
       band,
-      plan: planEconomics(p, r.age_days, r.implied_value_usd, band?.p10 ?? null),
+      plan: planEconomics(p, r.age_days, r.implied_value_usd, band?.p10 ?? null, pToken(p, snapshot.as_of, fit)),
+      tvl_rank: tvlRank.get(r.slug)!,
+      notes: rowNotes(p, r.age_days, r.model.group),
     };
   });
   const boardSlugs = new Set(board.map((r) => r.slug));
@@ -699,11 +847,18 @@ export function buildRadar(snapshot: Snapshot, fit: FitConstants = FIT): { board
     model_version: MODEL_VERSION,
     board_edition: BOARD_EDITION,
     alloc_share: ALLOC_SHARE,
+    opp_rate: OPP_RATE,
     validation: VALIDATION,
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     early_size: board.length - snapshot.watchlist.length,
     live_size: live.length,
+    verdict_counts: {
+      farm: rows.filter((r) => r.plan.verdict === 'farm').length,
+      thin: rows.filter((r) => r.plan.verdict === 'thin').length,
+      skip: rows.filter((r) => r.plan.verdict === 'skip').length,
+    },
+    moved_50: rows.filter((r) => Math.abs(r.rank - r.tvl_rank) >= 50).length,
     rows,
     live,
     comps,

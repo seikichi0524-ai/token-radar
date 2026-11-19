@@ -1,4 +1,4 @@
-// Token Radar (radar-3 fit, board edition 2) — entry point. Node 22,
+// Token Radar (radar-4 fit, board edition 4) — entry point. Node 22,
 // standard library only.
 //
 // Reads the sealed snapshot, scores every selected pre-token protocol with
