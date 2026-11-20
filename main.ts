@@ -1,9 +1,11 @@
-// Token Radar (radar-4 fit, board edition 4) — entry point. Node 22,
+// Token Radar (radar-4 fit, board edition 5) — entry point. Node 22,
 // standard library only.
 //
 // Reads the sealed snapshot, scores every selected pre-token protocol with
 // lib/model.ts — a valuation fitted on the snapshot's own issued protocols,
-// not hand-set — then writes into the output directory:
+// not hand-set — ranks the board by expected value (issuance probability
+// times launch value, the edition-5 definition of the board's implied
+// value), then writes into the output directory:
 //   board.json    the ranked board (watchlist fully covered, 100+ rows)
 //   data.js       the same board in the dashboard's compact form
 //   dashboard/    a copy of this repo's dashboard/
@@ -93,7 +95,7 @@ const top = board[0];
 process.stdout.write(
   'token radar: ' + snapshot.protocols.length + ' protocols, ' + snapshot.watchlist.length + ' watchlist, ' +
     board.length + ' rows scored (' + radar.early_size + ' early, ' + radar.live_size + ' live set aside)\n' +
-    (top === undefined ? '' : 'token radar: top of the board is ' + top.name + ' at $' + top.implied_value_usd.toLocaleString('en-US') + ' implied\n') +
+    (top === undefined ? '' : 'token radar: top of the board is ' + top.name + ' at $' + top.implied_value_usd.toLocaleString('en-US') + ' expected value\n') +
     'token radar: model ' + radar.model_version + ' (board edition ' + radar.board_edition + ') fitted on ' + radar.model.comps + ' issued comparables' +
     ' (out-of-sample median log error ' + radar.validation.fitted_median_log_err + ' vs ' +
     radar.validation.radar2_median_log_err + ' for the hand-set radar-2); ' +
